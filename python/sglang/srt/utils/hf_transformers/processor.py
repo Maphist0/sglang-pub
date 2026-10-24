@@ -254,6 +254,17 @@ def get_processor(
             revision=revision,
             **kwargs,
         )
+    # MiniCPM's SGLang canvas processor owns image preprocessing.
+    if config.model_type == "minicpmv4_7":
+        return get_tokenizer(
+            tokenizer_name,
+            *args,
+            tokenizer_mode=tokenizer_mode,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            tokenizer_backend=tokenizer_backend,
+            **kwargs,
+        )
     if config.model_type == "deepseek_v41" and config.vision_n_layers > 0:
         return get_tokenizer(
             tokenizer_name, trust_remote_code=trust_remote_code, revision=revision
