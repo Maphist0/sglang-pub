@@ -245,8 +245,11 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
 
             metadata = get_global_expert_location_metadata()
             physical_to_logical_map_cpu = (
-                torch.arange(self.global_num_experts, dtype=torch.int64) if metadata is None
-                else metadata.physical_to_logical_map_cpu[self.kt_config.layer_idx].contiguous()
+                torch.arange(self.global_num_experts, dtype=torch.int64)
+                if metadata is None
+                else metadata.physical_to_logical_map_cpu[
+                    self.kt_config.layer_idx
+                ].contiguous()
             )
             self.wrapper.load_weights(physical_to_logical_map_cpu)
 
@@ -362,7 +365,9 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
         # Create modified dispatch output for GPU computation
         masked_topk_output = topk_output._replace(
             topk_ids=masked_topk_ids,
-            topk_weights=topk_output.topk_weights.masked_fill(topk_ids >= self.num_gpu_experts, 0),
+            topk_weights=topk_output.topk_weights.masked_fill(
+                topk_ids >= self.num_gpu_experts, 0
+            ),
         )
         masked_dispatch_output = dispatch_output._replace(
             topk_output=masked_topk_output
@@ -376,6 +381,30 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
         output = gpu_combine_input.hidden_states
         if self.tp_rank == 0:
             cpu_output = self.sync(x)
+            import os
+
+            if os.environ.get("MINICPM_KT_AUDIT") == "1" and not getattr(
+                self, "_audited", False
+            ):
+                torch.cuda.synchronize()
+                print(
+                    "KT_NUMERIC_AUDIT",
+                    self.kt_config.layer_idx,
+                    "input",
+                    bool(torch.isfinite(x).all()),
+                    float(x.float().norm()),
+                    "gpu",
+                    bool(torch.isfinite(output).all()),
+                    float(output.float().norm()),
+                    "cpu",
+                    bool(torch.isfinite(cpu_output).all()),
+                    float(cpu_output.float().norm()),
+                    flush=True,
+                )
+                self._audited = True
+                assert (
+                    torch.isfinite(output).all() and torch.isfinite(cpu_output).all()
+                ), "KT CPU/GPU output is non-finite"
             output = output + cpu_output
 
         return StandardCombineInput(hidden_states=output)

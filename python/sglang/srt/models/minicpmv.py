@@ -1661,6 +1661,45 @@ def _v4_7_to_v4_6_weight_name(name: str) -> str:
     return re.sub(r"^(model\.merger\.mlp\.\d+)\.mlp\.2\.", r"\1.linear_2.", name)
 
 
+def _minicpm47_runtime_audit(model):
+    import json
+    import os
+    from pathlib import Path
+
+    target = os.environ.get("MINICPM47_AUDIT_PATH")
+    if not target or getattr(model, "_runtime_audited", False):
+        return
+    model._runtime_audited = True
+    parameters = [
+        {
+            "name": n,
+            "dtype": str(p.dtype),
+            "device": str(p.device),
+            "numel": p.numel(),
+            "bytes": p.numel() * p.element_size(),
+        }
+        for n, p in model.named_parameters()
+    ]
+    experts = []
+    for n, m in model.named_modules():
+        q = getattr(m, "quant_method", None)
+        if q is not None and hasattr(q, "kt_config"):
+            experts.append(
+                {
+                    "name": n,
+                    "gpu_experts": q.num_gpu_experts,
+                    "total_experts": q.global_num_experts,
+                    "cpu_method": q.kt_config.method,
+                    "cpu_backend": type(q.wrapper.moe).__name__,
+                }
+            )
+    Path(target).write_text(
+        json.dumps(
+            {"parameters": parameters, "hybrid_expert_layers": experts}, indent=2
+        )
+    )
+
+
 class MiniCPMV4_7(MiniCPMV4_6):
     def __init__(
         self,
@@ -1679,6 +1718,7 @@ class MiniCPMV4_7(MiniCPMV4_6):
         forward_batch: ForwardBatch,
         **kwargs: Any,
     ) -> torch.Tensor:
+        _minicpm47_runtime_audit(self)
         if self.is_mrope_enabled:
             positions = forward_batch.mrope_positions
         return super().forward(
