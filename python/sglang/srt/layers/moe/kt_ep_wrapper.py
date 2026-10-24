@@ -97,21 +97,13 @@ def create_kt_config_from_server_args(
 
 @torch.compile(dynamic=True, backend=get_compiler_backend())
 def mask_cpu_expert_ids(topk_ids: torch.Tensor, num_gpu_experts: int) -> torch.Tensor:
-    """Mask CPU expert IDs by setting them to -1.
+    """Return separate GPU routing IDs, mapping CPU slots to expert zero.
 
-    This function masks expert IDs that should be computed on CPU (IDs >= num_gpu_experts)
-    so they won't be computed on GPU. The masked IDs are set to -1, which causes the
-    GPU MoE kernel to skip those experts.
-
-    Args:
-        topk_ids: Tensor of shape [num_tokens, top_k] containing expert IDs
-        num_gpu_experts: Number of experts that should run on GPU (experts 0 to num_gpu_experts-1)
-
-    Returns:
-        Modified topk_ids tensor with CPU expert IDs masked as -1
+    The caller also zeros the routing weights for these slots. Keeping the
+    original tensor intact preserves asynchronous CPU reads, and valid GPU
+    IDs avoid undefined outputs from kernels that do not support negative IDs.
     """
-    topk_ids[topk_ids >= num_gpu_experts] = -1
-    return topk_ids
+    return topk_ids.masked_fill(topk_ids >= num_gpu_experts, 0)
 
 
 class KTEPWrapperMethod(FusedMoEMethodBase):
@@ -363,12 +355,15 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
             self.submit(layer, dispatch_output)
 
         # Step 2: Prepare GPU computation by masking CPU expert IDs
-        # CPU expert IDs (>= num_gpu_experts) are set to -1 so GPU kernel skips them
+        # CPU slots use a valid GPU ID with zero routing weight.
         topk_ids = topk_output.topk_ids
         masked_topk_ids = mask_cpu_expert_ids(topk_ids, self.num_gpu_experts)
 
         # Create modified dispatch output for GPU computation
-        masked_topk_output = topk_output._replace(topk_ids=masked_topk_ids)
+        masked_topk_output = topk_output._replace(
+            topk_ids=masked_topk_ids,
+            topk_weights=topk_output.topk_weights.masked_fill(topk_ids >= self.num_gpu_experts, 0),
+        )
         masked_dispatch_output = dispatch_output._replace(
             topk_output=masked_topk_output
         )
