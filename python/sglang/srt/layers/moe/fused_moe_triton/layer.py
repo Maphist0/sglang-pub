@@ -1076,6 +1076,12 @@ class FusedMoE(torch.nn.Module):
         shard_id: str,
         expert_id: Optional[int],
     ) -> None:
+        # KT keeps a contiguous GPU expert prefix; the remaining weights load on CPU.
+        if expert_id is not None and getattr(
+            self.quant_method, "override_num_local_experts", False
+        ):
+            if expert_id >= self.quant_method.num_gpu_experts:
+                return
         # if expert_id is None, then
         # all the experts are loaded at the same time
         if (
