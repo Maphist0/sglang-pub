@@ -158,6 +158,12 @@ class OffloaderV1(BaseOffloader):
         # use pin_memory if possible, which helps cudagraph capture speed
         offloaded_parameters = False
         resident_parameter_ids = _get_resident_parameter_ids(module)
+        # Keep derived normalization/attention state resident; offload expert weights only.
+        resident_parameter_ids.update(
+            id(p)
+            for name, p in module.named_parameters()
+            if ".experts." not in "." + name
+        )
         for p in module.parameters():
             if id(p) in resident_parameter_ids:
                 continue
