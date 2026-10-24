@@ -79,7 +79,7 @@ def create_kt_config_from_server_args(
         return None
 
     num_layers = getattr(
-        model_config_of(server_args).hf_config, "num_hidden_layers", None
+        model_config_of(server_args).hf_text_config, "num_hidden_layers", None
     )
 
     return KTConfig(
@@ -222,6 +222,7 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                 num_experts_per_tok=num_experts_per_tok,
                 hidden_size=hidden_size,
                 moe_intermediate_size=intermediate_size_full,
+                gpu_experts_mask=(torch.arange(num_experts) < self.num_gpu_experts),
                 num_gpu_experts=self.num_gpu_experts,
                 cpuinfer_threads=self.kt_config.cpuinfer_threads,
                 threadpool_count=self.kt_config.threadpool_count,
@@ -250,10 +251,10 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                 get_global_expert_location_metadata,
             )
 
+            metadata = get_global_expert_location_metadata()
             physical_to_logical_map_cpu = (
-                get_global_expert_location_metadata()
-                .physical_to_logical_map_cpu[self.kt_config.layer_idx]
-                .contiguous()
+                torch.arange(self.global_num_experts, dtype=torch.int64) if metadata is None
+                else metadata.physical_to_logical_map_cpu[self.kt_config.layer_idx].contiguous()
             )
             self.wrapper.load_weights(physical_to_logical_map_cpu)
 
