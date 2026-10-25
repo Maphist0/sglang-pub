@@ -155,6 +155,7 @@ from sglang.srt.utils import (
     use_intel_amx_backend,
 )
 from sglang.srt.utils.hf_transformers_utils import get_processor, get_rope_config
+from sglang.srt.utils.hybrid_runtime_audit import audit_hybrid_runtime
 
 logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
@@ -2656,6 +2657,10 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
+    def forward(self, *args, **kwargs):
+        audit_hybrid_runtime(self)
+        return super().forward(*args, **kwargs)
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         weights = QWEN3_5_KV_SCALE_MAPPER.apply(weights)
         stacked_params_mapping = [
@@ -2767,6 +2772,9 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
 
         for name, loaded_weight in weights:
+            # Compressed-tensors shape records describe storage, not parameters.
+            if name.endswith(".weight_shape"):
+                continue
             if "rotary_emb.inv_freq" in name:
                 continue
             if "mtp" in name:

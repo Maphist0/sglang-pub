@@ -6,14 +6,16 @@ CUDA-heavy imports; only the transport boundary is stubbed.
 
 import ast
 import copy
+import json
 import os
 import sys
+import tempfile
 import unittest
 from collections import namedtuple
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Optional
+from typing import Iterable, Optional, Set, Tuple
 from unittest.mock import Mock, patch
 
 import torch
@@ -183,6 +185,132 @@ class TestMiniCPMHybridPort(unittest.TestCase):
         calls.assert_not_called()
         method(layer, parameter, torch.ones(1), "weight", "w1", 1)
         self.assertEqual(calls.call_args.kwargs["expert_id"], 1)
+
+    def test_minicpm_layout_survives_eval_unwrapping(self):
+        tree = ast.parse((SRT / "models/minicpmv.py").read_text())
+        wrapper = next(
+            n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MiniCPMV"
+        )
+        methods = [
+            copy.deepcopy(n)
+            for n in wrapper.body
+            if getattr(n, "name", None) == "shared_experts_config"
+        ]
+        cls = ast.ClassDef(
+            name="Wrapper", bases=[], keywords=[], body=methods, decorator_list=[]
+        )
+        scope = {}
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])),
+                "minicpmv-layout",
+                "exec",
+            ),
+            scope,
+        )
+        model = scope["Wrapper"]()
+        model.minicpmv = torch.nn.Linear(1, 1)
+        layout = object()
+        model.shared_experts_config = layout
+        self.assertIs(model.shared_experts_config, layout)
+        self.assertIs(model.minicpmv.eval().shared_experts_config, layout)
+
+    def test_qwen_packed_metadata_is_not_loaded_as_an_expert(self):
+        loader = Mock()
+        parameter = SimpleNamespace(weight_loader=loader)
+        mapper = SimpleNamespace(apply=lambda weights: weights)
+        scope = namespace(
+            Iterable=Iterable,
+            Tuple=Tuple,
+            Set=Set,
+            QWEN3_5_KV_SCALE_MAPPER=mapper,
+            FusedMoE=SimpleNamespace(
+                make_expert_params_mapping=lambda **_: [
+                    ("experts.w13_", "experts.0.gate_proj.", 0, "w1")
+                ]
+            ),
+            get_layer_id=lambda _: None,
+            default_weight_loader=loader,
+            LazyValue=lambda fn: fn,
+        )
+        method = load(
+            "models/qwen3_5.py",
+            "load_weights",
+            scope,
+            "Qwen3_5MoeForConditionalGeneration",
+        )
+        model = SimpleNamespace(
+            config=SimpleNamespace(
+                num_experts=1, tie_word_embeddings=False, encoder_only=False
+            ),
+            enable_shared_expert_fusion=False,
+            named_parameters=lambda **_: [
+                ("model.layers.0.mlp.experts.w13_weight_packed", parameter)
+            ],
+        )
+        packed = torch.tensor([[1, 2]], dtype=torch.int32)
+        entries = [
+            (
+                "model.language_model.layers.0.mlp.experts.0.gate_proj.weight_shape",
+                torch.tensor([1, 16]),
+            ),
+            (
+                "model.language_model.layers.0.mlp.experts.0.gate_proj.weight_packed",
+                packed,
+            ),
+        ]
+        consumed = []
+
+        def weights():
+            for entry in entries:
+                consumed.append(entry[0])
+                yield entry
+
+        loaded = method(model, weights())
+        self.assertEqual(consumed, [name for name, _ in entries])
+        self.assertEqual(loaded, {"model.layers.0.mlp.experts.w13_weight_packed"})
+        loader.assert_called_once()
+        self.assertIs(loader.call_args.args[1], packed)
+        self.assertEqual(loader.call_args.kwargs, {"shard_id": "w1", "expert_id": 0})
+
+    def test_runtime_audit_is_optional_and_written_once(self):
+        scope = dict(os=os, json=json, Path=Path)
+        audit = load("utils/hybrid_runtime_audit.py", "audit_hybrid_runtime", scope)
+        method = SimpleNamespace(
+            num_gpu_experts=128,
+            global_num_experts=256,
+            kt_config=SimpleNamespace(
+                method="RAWINT4", max_deferred_experts_per_token=0
+            ),
+            wrapper=SimpleNamespace(moe=object()),
+            gpu_method=object(),
+        )
+        module = SimpleNamespace(
+            quant_method=method, scheme=object(), is_marlin_converted=True
+        )
+        model = SimpleNamespace(
+            named_parameters=Mock(return_value=[("weight", torch.ones(2))]),
+            named_modules=lambda: [("experts", module)],
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            audit(model)
+            model.named_parameters.assert_not_called()
+            target = Path(directory) / "audit.json"
+            os.environ["HYBRID_REFERENCE_AUDIT_PATH"] = str(target)
+            audit(model)
+            saved = target.read_bytes()
+            audit(model)
+            self.assertEqual(target.read_bytes(), saved)
+            model.named_parameters.assert_called_once()
+            result = json.loads(saved)
+            self.assertEqual(result["parameters"][0]["shape"], [2])
+            layer = result["hybrid_expert_layers"][0]
+            self.assertEqual(layer["gpu_experts"], 128)
+            self.assertEqual(layer["deferred_experts"], 0)
+            self.assertTrue(layer["gpu_marlin_converted"])
 
     def test_canvas_uses_tokenizer_and_keeps_options(self):
         tokenizer = Mock(return_value=object())

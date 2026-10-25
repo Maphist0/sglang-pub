@@ -1,0 +1,28 @@
+{
+  "name": "qwen36-kt-opt-8k-prefix",
+  "threads": 8,
+  "mem_fraction": 0.96,
+  "flags": [
+    "--kt-method",
+    "RAWINT4",
+    "--kt-cpuinfer",
+    "8",
+    "--kt-threadpool-count",
+    "1",
+    "--kt-num-gpu-experts",
+    "128",
+    "--kt-max-deferred-experts-per-token",
+    "0",
+    "--disable-overlap-schedule",
+    "--cuda-graph-config",
+    "{\"prefill\": {\"backend\": \"disabled\"}, \"decode\": {\"backend\": \"full\", \"bs\": [1], \"max_bs\": 1}}",
+    "--max-mamba-cache-size",
+    "4"
+  ],
+  "env": {
+    "KT_RAWINT4_BACKEND": "avxvnni256"
+  },
+  "chunk": 1024,
+  "context": 8192,
+  "prefix_cache": true
+}
